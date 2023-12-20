@@ -120,7 +120,7 @@ int calculate_ls_reward() {
         return ();
     }
 
-    if (op == OP::EXTEND | op == 0) {
+    if ((op == OP::EXTEND) | (op == 0)) {
         throw_unless(103, active);
         last_time_payed = now();
         save_data();
@@ -151,7 +151,7 @@ int calculate_ls_reward() {
 ;;    (_, slice src_addr) = parse_addr(in_msg_full_cs);
 ;;    int src_addr_int = src_addr~load_uint(256);
 
-    int signature = in_msg_body~load_bits(512);
+    slice signature = in_msg_body~load_bits(512);
     var cs = in_msg_body;
 
     int op = cs~load_uint(32);
