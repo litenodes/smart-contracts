@@ -1,0 +1,151 @@
+#include "imports/stdlib.fc";
+#include "imports/utils.fc";
+
+
+const OP::CREATE_PAIR = 0x58d091f9;
+const OP::DEPLOY_PAIR = 0;
+const OP::CHANGE_PRICE = 0;
+const OP::DEACTIVATE_NOTIFICATION = 0;
+
+
+global int ls_pubkey;
+global int price_per_sec;
+global int users_amount;
+global int users_limit;
+global cell pair_contract_code;
+
+
+;; TL-B schemes
+;; pair_params#_ price_per_sec:Coins = PairParams;
+;; create_pair#58d091f9 query_id:uint64 user_pub_key:uint256 params:^PairParams = InMsgBody;
+;; change_price new_price:Coins = InMsgBody;
+
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    ls_pubkey = ds~load_uint(256);
+    price_per_sec = ds~load_coins();
+    users_amount = ds~load_uint(32);
+    users_limit = ds~load_uint(32);
+    pair_contract_code = ds~load_ref();
+}
+
+() save_data() impure inline {
+    set_data(begin_cell()
+        .store_uint(ls_pubkey, 256)
+        .store_coins(price_per_sec)
+        .store_uint(users_amount, 32)
+        .store_uint(users_limit, 32)
+        .store_ref(pair_contract_code)
+    );
+}
+
+
+cell calculate_pair_state_init(int user_pub_key) inline {
+
+    cell data = begin_cell()
+        .store_int(0, 1)
+        .store_uint(ls_pubkey, 256)
+        .store_slice(my_address())
+        .store_uint(0, 32)
+        .store_coins(0)
+        .store_uint(user_pub_key, 256)
+        .store_slice(null_addr())
+        .end_cell();
+
+    return begin_cell()
+        .store_uint(0, 2)
+        .store_dict(pair_contract_code)
+        .store_dict(data)
+        .store_uint(0, 1)
+        .end_cell();
+}
+
+slice calculate_pair_address(int state_init) inline {
+    return begin_cell()
+            .store_uint(4, 3)
+            .store_int(0, 8)
+            .store_uint(cell_hash(state_init), 256)
+            .end_cell()
+            .begin_parse();
+}
+
+
+() deploy_pair_contract(int query_id, int user_pub_key) impure {
+    cell pair_data = begin_cell()
+        .store_uint(OP::DEPLOY_PAIR, 32)
+        .store_uint(query_id, 64)
+        .store_coins(price_per_sec)
+        .end_cell();
+
+    cell state_init = calculate_pair_state_init(user_pub_key);
+
+    slice pair_address = calculate_pair_address(state_init);
+
+    var msg = begin_cell()
+            .store_uint(FLAGS::NON_BOUNCEABLE, 6)
+            .store_slice(pair_address)
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(state_init)
+            .store_ref(pair_data);
+
+    send_raw_message(msg.end_cell(), 64);
+
+    save_data();
+    return ();
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == OP::CREATE_PAIR) {
+        int user_pub_key = in_msg_body~load_uint(256);
+        int signature = in_msg_body~load_uint(512);
+        slice params = in_msg_body~load_ref().begin_parse();
+
+        ;; check that user is really agree with price
+        throw_unless(35, check_signature(slice_hash(params), signature, user_pub_key));
+
+        int wanted_price_per_sec = params~load_coins();
+        throw_unless(101, wanted_price_per_sec == price_per_sec);
+        throw_unless(102, users_amount + 1 <= users_limit);
+        deploy_pair_contract(query_id, user_pub_key);
+        users_amount += 1;
+        save_data();
+        return ();
+
+    } elseif (op == OP::CHANGE_PRICE) {
+        throw_unless(201, users_amount == 0);
+        int signature = in_msg_body~load_uint(512);
+        throw_unless(35, check_signature(slice_hash(in_msg_body), signature, ls_pubkey));
+        price_per_sec = in_msg_body~load_coins();
+        save_data();
+        return ();
+    } elseif (op == OP::DEACTIVATE_NOTIFICATION) {
+        throw_unless(202, users_amount > 0);
+        int user_pubkey = in_msg_body~load_uint(256);
+        cell state_init = calculate_pair_state_init(user_pubkey);
+        slice pair_address = calculate_pair_address(state_init);
+        throw_unless(202, pair_address == sender_address);
+        save_data();
+        return ();
+    }
+    throw(0xffffffff);
+}
+
+() recv_external(slice in_msg) impure {
+    load_data();
+
+    save_data();
+    return ();
+}

@@ -1,0 +1,21 @@
+slice null_addr() asm "b{00} PUSHSLICE";
+
+const FLAGS::BOUNCEABLE = 0x18;
+const FLAGS::NON_BOUNCEABLE = 0x10;
+
+
+() send_msg(slice to_address, int amount, cell payload, int flags, int send_mode) impure inline_ref {
+    int has_payload = ~ cell_null?(payload);
+
+    builder msg = begin_cell()
+            .store_uint(flags, 6)
+            .store_slice(to_address)
+            .store_coins(amount)
+            .store_uint(has_payload ? 1 : 0, 1 + 4 + 4 + 64 + 32 + 1 + 1);
+
+    if (has_payload) {
+        msg = msg.store_ref(payload);
+    }
+
+    send_raw_message(msg.end_cell(), send_mode);
+}

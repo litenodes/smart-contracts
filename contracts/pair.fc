@@ -1,0 +1,179 @@
+#include "imports/stdlib.fc";
+#include "imports/utils.fc";
+
+const OP::DEPLOY_PAIR = 0;
+const OP::REWARD = 0;
+const OP::DEACTIVATE = 0;
+const OP::CLAIM_REWARD = 0;
+const OP::DEACTIVATE_NOTIFICATION = 0;
+const OP::EXTEND = 0;
+
+const MIN_TON_FOR_STORAGE = 20000000;  ;; 0.02 TON
+const DEACTIVE_NOTIFICATION_VALUE = 10000000; ;; 0.01 TON
+
+global int active;
+global int ls_pubkey;
+global slice ls_deployer_address;
+global int last_time_payed;
+global int ls_price;
+global int user_pubkey;
+global slice user_address;
+
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    active = ds~load_int(1);
+    ls_pubkey = ds~load_uint(256);
+    ls_deployer_address = ds~load_msg_addr();
+    last_time_payed = ds~load_uint(32);
+    ls_price = ds~load_coins();
+    user_pubkey = ds~load_uint(256);
+    user_address = ds~load_msg_addr();
+}
+
+() save_data() impure inline {
+    set_data(begin_cell()
+        .store_int(active, 1)
+        .store_uint(ls_pubkey, 256)
+        .store_slice(ls_deployer_address)
+        .store_uint(last_time_payed, 32)
+        .store_coins(ls_price)
+        .store_uint(user_pubkey, 256)
+        .store_slice(user_address)
+        .end_cell()
+    );
+}
+
+
+int calculate_ls_reward() {
+    int reward = 0;
+    if (active) {
+        reward = (now() - last_time_payed) * ls_price;
+    }
+    return reward;
+}
+
+() pay_liteserver(slice destination_address, int query_id, int deactivate?) {
+;;    throw_unless(105, last_time_payed < now() - 60);
+    int amount = calculate_ls_reward();
+    amount += DEACTIVE_NOTIFICATION_VALUE * deactivate?;  ;; true = -1
+    if (destination_address.preload_uint(2) == 0) {  ;; addr none
+        destination_address = ls_deployer_address;
+    }
+    cell payload = begin_cell().store_uint(OP::REWARD, 32).store_uint(query_id, 64).end_cell();
+    last_time_payed = now();
+    send_msg(destination_address, amount, payload, FLAGS::NON_BOUNCEABLE, 0);
+    return ();
+}
+
+() send_excess_to_user(slice destination_address, int query_id) {
+    if (destination_address.preload_uint(2) == 0) {  ;; addr none
+        destination_address = user_address;
+    }
+    raw_reserve(MIN_TON_FOR_STORAGE, 4);
+    send_msg(destination_address, 0, begin_cell().store_uint(query_id, 64).end_cell(), FLAGS::NON_BOUNCEABLE, 128);
+    return ();
+}
+
+() deactivate_notify(int query_id) {
+    cell payload = begin_cell().store_uint(OP::DEACTIVATE_NOTIFICATION, 32).store_uint(query_id, 64).end_cell();
+    send_msg(ls_deployer_address, DEACTIVE_NOTIFICATION_VALUE, payload, FLAGS::NON_BOUNCEABLE, 0);
+    return ();
+}
+
+
+() deactivate(slice destination_ls_address, slice destination_user_address, int query_id) {
+    active = false;
+    pay_liteserver(destination_ls_address, query_id, true);
+    deactivate_notify(query_id);
+    send_excess_to_user(destination_user_address, query_id);
+    return ();
+}
+
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    int op = 0;
+    int query_id = 0;
+
+    if in_msg_body.slice_bits() >= 96 {
+        int op = in_msg_body~load_uint(32);
+        int query_id = cs~load_uint(64);
+    }
+
+    load_data();
+
+    if (op == OP::DEPLOY_PAIR) {
+        throw_unless(101, equal_slices(sender_address, ls_deployer_address));
+        throw_unless(102, active | my_balance < ls_price * 59); ;; user must pay for at least minute
+        ls_price = in_msg_body~load_coins();
+        active = true;
+        last_time_payed = now();
+        save_data();
+        return ();
+    }
+
+    if (op == OP::EXTEND | op == 0) {
+        throw_unless(103, active);
+        last_time_payed = now();
+        save_data();
+        return ();
+    }
+
+    if (op == OP::CLAIM_REWARD) {  ;; todo maybe if contract already not active allow ls to claim reward?
+        ;; claim_reward query_id:uint64 destination_address:MsgAddress = InMsgBody
+        var signature = in_msg_body~load_bits(512);
+        var cs = in_msg_body;
+        slice destination_address = cs~load_msg_addr();
+        throw_unless(35, check_signature(slice_hash(in_msg_body), signature, ls_pubkey));
+        pay_liteserver(destination_address, query_id, false);
+        save_data();
+        return ();
+    }
+    throw(0xffffffff);
+}
+
+() recv_external(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+    var in_msg_full_cs = in_msg_full.begin_parse();
+    in_msg_full_cs~skip_bits(2 + 2);  ;; msginfo tag + msgaddressext tag
+
+    int len = in_msg_full_cs~load_uint(9); ;; len:(## 9)
+    int external_address = in_msg_full_cs~load_uint(len); ;; external_address:(bits len)
+
+;;    (_, slice src_addr) = parse_addr(in_msg_full_cs);
+;;    int src_addr_int = src_addr~load_uint(256);
+
+    int signature = in_msg_body~load_bits(512);
+    var cs = in_msg_body;
+
+    int op = cs~load_uint(32);
+    int query_id = cs~load_uint(64);
+    slice destination_address = cs~load_msg_addr();
+
+    load_data();
+
+    if (op == OP::DEACTIVATE) {
+        throw_unless(104, active);
+        if external_address == ls_pubkey {
+            throw_unless(35, check_signature(slice_hash(in_msg_body), signature, ls_pubkey));
+            deactivate(destination_address, null_addr(), query_id);
+        } elseif external_address == user_pubkey {
+            throw_unless(35, check_signature(slice_hash(in_msg_body), signature, user_pubkey));
+            deactivate(null_addr(), destination_address, query_id);
+        } else {
+            throw(300);
+        }
+        active = false;
+        save_data();
+        return ();
+    }
+    throw(0xffffffff);
+}
