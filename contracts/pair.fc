@@ -46,7 +46,7 @@ global slice user_address;
 
 
 int calculate_ls_reward() inline {
-    (int balance, _) = get_balance();
+    int balance = pair_first(get_balance());
     int reward = min((now() - last_time_payed) * ls_price, balance);
     return reward;
 }
@@ -202,7 +202,7 @@ int payed_for_now?() method_id {
     ifnot (active) {
         return false;
     }
-    (int balance, _) = get_balance();
+    int balance = pair_first(get_balance());
     int reward = (now() - last_time_payed) * ls_price;
     if (reward < balance - MIN_TON_FOR_STORAGE) {
         return true;
