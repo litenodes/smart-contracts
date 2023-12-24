@@ -45,15 +45,13 @@ global slice user_address;
 }
 
 
-int calculate_ls_reward() {
-    int reward = 0;
-    if (active) {
-        reward = (now() - last_time_payed) * ls_price;
-    }
+int calculate_ls_reward() inline {
+    (int balance, _) = get_balance();
+    int reward = min((now() - last_time_payed) * ls_price, balance);
     return reward;
 }
 
-() pay_liteserver(slice destination_address, int query_id, int deactivate?) {
+() pay_liteserver(slice destination_address, int query_id, int deactivate?) inline_ref {
 ;;    throw_unless(105, last_time_payed < now() - 60);
     int amount = calculate_ls_reward();
     amount += DEACTIVE_NOTIFICATION_VALUE * deactivate?;  ;; true = -1
@@ -66,7 +64,7 @@ int calculate_ls_reward() {
     return ();
 }
 
-() send_excess_to_user(slice destination_address, int query_id) {
+() send_excess_to_user(slice destination_address, int query_id) inline {
     if (destination_address.preload_uint(2) == 0) {  ;; addr none
         destination_address = user_address;
     }
@@ -75,14 +73,14 @@ int calculate_ls_reward() {
     return ();
 }
 
-() deactivate_notify(int query_id) {
+() deactivate_notify(int query_id) inline {
     cell payload = begin_cell().store_uint(OP::DEACTIVATE_NOTIFICATION, 32).store_uint(query_id, 64).end_cell();
     send_msg(ls_deployer_address, DEACTIVE_NOTIFICATION_VALUE, payload, FLAGS::NON_BOUNCEABLE, 0);
     return ();
 }
 
 
-() deactivate(slice destination_ls_address, slice destination_user_address, int query_id) {
+() deactivate(slice destination_ls_address, slice destination_user_address, int query_id) impure inline {
     active = false;
     pay_liteserver(destination_ls_address, query_id, true);
     deactivate_notify(query_id);
@@ -164,9 +162,11 @@ int calculate_ls_reward() {
         throw_unless(104, active);
         if external_address == ls_pubkey {
             throw_unless(35, check_signature(slice_hash(in_msg_body), signature, ls_pubkey));
+            accept_message();
             deactivate(destination_address, null_addr(), query_id);
         } elseif external_address == user_pubkey {
             throw_unless(35, check_signature(slice_hash(in_msg_body), signature, user_pubkey));
+            accept_message();
             deactivate(null_addr(), destination_address, query_id);
         } else {
             throw(300);
@@ -176,4 +176,36 @@ int calculate_ls_reward() {
         return ();
     }
     throw(0xffffffff);
+}
+
+
+(int, int, slice, int, int, int, slice) get_pair_data() method_id {
+    load_data();
+    return (active,
+            ls_pubkey,
+            ls_deployer_address,
+            last_time_payed,
+            ls_price,
+            user_pubkey,
+            user_address
+    );
+}
+
+
+int get_expected_ls_reward() method_id {
+    load_data();
+    return calculate_ls_reward();
+}
+
+int payed_for_now?() method_id {
+    load_data();
+    ifnot (active) {
+        return false;
+    }
+    (int balance, _) = get_balance();
+    int reward = (now() - last_time_payed) * ls_price;
+    if (reward < balance - MIN_TON_FOR_STORAGE) {
+        return true;
+    }
+    return false;
 }
